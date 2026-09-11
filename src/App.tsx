@@ -269,13 +269,16 @@ export default function App() {
    * no body — the map comes from the recorded winner and the player from the session —
    * so there is nothing here to assemble, only the outcome to report.
    */
-  const handleImportScore = async (): Promise<string | null> => {
-    const result = await api.challenge.importMine();
-    if (!result.ok) return result.error;
-    // The whole set reloads: one new score changes the order and every rank in it.
-    await refresh();
-    return null;
-  };
+const handleImportScore = async (
+  osuScoreId: number
+): Promise<string | null> => {
+  const result = await api.challenge.importMine(osuScoreId);
+
+  if (!result.ok) return result.error;
+
+  await refresh();
+  return null;
+};
 
   /**
    * Favoriting addresses the BEATMAP, so it needs the osu! difficulty id rather than the

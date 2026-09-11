@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Beatmap, Phase, PlatformPage } from '../../types';
 import { ApiChallengeScore, ApiSubmission } from '../../api/client';
+import { api } from '../../api/client';
 import { CurrentRound, formatDeadline, isBallotOpen, roundLabel, useCountdown } from '../../lib/round';
 import { beatmapUrl, REVIEW_PRESENTATION, toBeatmap } from '../../lib/submission';
 import { BeatmapCardPlatform } from './BeatmapCardPlatform';
@@ -117,26 +118,49 @@ function MyChallengeScore({
   score,
   requirement,
   modRequirement,
-  onImport,
+  onImportScore,
   user,
   onLogin,
 }: {
   score: ApiChallengeScore | null;
   requirement: string | null;
   modRequirement: string | null;
-  onImport: () => Promise<string | null>;
+  onImportScore: (osuScoreId: number) => Promise<string | null>;
   user: AuthUser | null;
   onLogin?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async () => {
-    setBusy(true);
-    setError(null);
-    setError(await onImport());
+const [availableScores, setAvailableScores] = useState<
+  Array<{
+    osuScoreId: number;
+    score: number;
+    accuracy: number;
+    misses: number;
+    mods: string;
+    pp: number | null;
+    rank: string;
+    passed: boolean;
+    endedAt: string | null;
+  }>
+>([]);
+
+const run = async () => {
+  setBusy(true);
+  setError(null);
+
+  const result = await api.challenge.available();
+
+  if (!result) {
+    setError('Could not load your available challenge scores.');
     setBusy(false);
-  };
+    return;
+  }
+
+  setAvailableScores(result.scores);
+  setBusy(false);
+};
 
   const importButton = (
     <button
@@ -149,6 +173,57 @@ function MyChallengeScore({
       {busy ? 'Reading osu!…' : score ? 'Refresh from osu!' : 'Import my score'}
     </button>
   );
+
+const scoreSelector = availableScores.length > 0 && (
+  <div className="mt-4 space-y-2">
+    <p className="text-[10px] uppercase tracking-widest text-slate-600 font-mono">
+      Select your score
+    </p>
+
+    {availableScores.map((available) => (
+      <div
+        key={available.osuScoreId}
+        className="bg-slate-900/60 border border-slate-800/60 rounded-xl p-3"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-white font-black font-mono">
+              {available.score.toLocaleString()}
+            </p>
+
+            <p className="text-[11px] text-slate-400 mt-1">
+              {available.accuracy.toFixed(2)}% · {available.misses} miss
+              {available.misses === 1 ? '' : 'es'} · {available.mods}
+            </p>
+
+            {available.endedAt && (
+              <p className="text-[10px] text-slate-600 mt-1">
+                {new Date(available.endedAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              setError(null);
+
+              void onImportScore(available.osuScoreId).then((message) => {
+                setError(message);
+                setBusy(false);
+              });
+            }}
+            className="flex-shrink-0 px-3 py-1.5 rounded-lg text-[10px] font-black bg-amber-400 hover:bg-amber-300 text-slate-950 disabled:opacity-40 transition-all"
+          >
+            Select
+          </button>
+        </div>
+      </div>
+    ))}
+  </div>
+);
 
   return (
     <div className="bg-[#0d1526] border border-amber-400/20 rounded-2xl p-6">
@@ -211,6 +286,7 @@ function MyChallengeScore({
             </p>
           )}
           {importButton}
+          {scoreSelector}
         </div>
       ) : (
         <>
@@ -263,9 +339,12 @@ function MyChallengeScore({
             </p>
           )}
 
-          {user.canChallenge ? (
-            <div className="mt-4">{importButton}</div>
-          ) : (
+         {user.canChallenge ? (
+  <div className="mt-4">
+    {importButton}
+    {scoreSelector}
+  </div>
+) : (
             /* The row stays — it was earned and it is on the leaderboard — but refreshing
                it is the permission this account no longer has. */
             <p className="text-[11px] text-slate-600 mt-4 leading-relaxed">
@@ -725,7 +804,7 @@ interface DashboardPageProps {
   /** The caller's own recorded score for this round, or null. */
   myScore: ApiChallengeScore | null;
   /** Imports the caller's osu! score. Resolves to an error message, or null on success. */
-  onImportScore: () => Promise<string | null>;
+  onImportScore: (osuScoreId: number) => Promise<string | null>;
   onNavigate: (page: PlatformPage) => void;
   user: AuthUser | null;
   onLogin?: () => void;
@@ -1209,7 +1288,7 @@ export function DashboardPage({
               score={myRow}
               requirement={recordedWinner?.challengeType ?? null}
               modRequirement={recordedWinner?.modRequirement ?? null}
-              onImport={onImportScore}
+              onImportScore={onImportScore}
               user={user}
               onLogin={onLogin}
             />

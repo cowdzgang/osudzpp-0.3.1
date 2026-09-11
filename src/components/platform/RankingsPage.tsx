@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Crown, Medal, ChevronLeft, ChevronRight,
   RefreshCw, Trophy, AlertCircle, BarChart2, Search, SearchX, X,
+  Layers, RotateCcw,
 } from 'lucide-react';
 import { api, ApiRankingEntry, ApiRankingPage } from '../../api/client';
 import { AuthUser } from './NavHeader';
@@ -21,6 +22,17 @@ import { pageNumbers, showingRange, totalPages } from '../../lib/rankings';
 //
 // DZPP IS NOT osu! pp, and the page says so twice on purpose. It is earned only by playing
 // the monthly challenges, and no osu! profile total or global rank feeds into it.
+//
+// SCOPE vs YEAR. There are three UI scopes: all-time, yearly, and seasonal. Seasonal is a
+// UI convenience that pins the year selector to the current calendar year and shows the
+// seasonal info banner — it is NOT a separate API parameter. The backend receives
+// year = currentYear for seasonal, identical to choosing that year under yearly. The banner
+// explains the 3-round cadence; it does not claim the API resets points per season.
+
+type Scope = 'all-time' | 'yearly' | 'seasonal';
+
+/** The current calendar year, used to pin the seasonal view. */
+const CURRENT_YEAR = new Date().getFullYear();
 
 interface RankingsPageProps {
   /** The signed-in account, so the caller's own row can be marked. Null when signed out. */
@@ -190,7 +202,12 @@ function Pagination({
 }
 
 export function RankingsPage({ user }: RankingsPageProps) {
-  /** Null is all-time, which is the default view. A number is that calendar season. */
+  /** UI scope — drives what the segmented control shows as active. */
+  const [scope, setScope] = useState<Scope>('all-time');
+  /**
+   * The year sent to the API. Null is all-time. Seasonal pins this to CURRENT_YEAR;
+   * yearly lets the user pick from the years the API returns.
+   */
   const [year, setYear] = useState<number | null>(null);
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState('');
@@ -228,7 +245,26 @@ export function RankingsPage({ user }: RankingsPageProps) {
   const total = board?.total ?? 0;
   const pageSize = board?.pageSize ?? 50;
   const pages = totalPages(total, pageSize);
-  const scopeLabel = year === null ? 'All-time' : String(year);
+  const scopeLabel =
+    scope === 'seasonal'
+      ? `${CURRENT_YEAR} (Seasonal)`
+      : year === null
+        ? 'All-time'
+        : String(year);
+
+  /** Change scope and keep year in sync with what the API expects. */
+  function changeScope(next: Scope) {
+    setScope(next);
+    setPage(1);
+    if (next === 'all-time') {
+      setYear(null);
+    } else if (next === 'seasonal') {
+      setYear(CURRENT_YEAR);
+    } else {
+      // yearly: default to the first (newest) year the API knows about, or current year
+      setYear(years[0] ?? CURRENT_YEAR);
+    }
+  }
   const searching = query.trim() !== '';
 
   // CLIENT-SIDE, over the rows this page already holds. There is no search endpoint, and with
@@ -328,6 +364,12 @@ export function RankingsPage({ user }: RankingsPageProps) {
             <div className="text-[9px] text-slate-600 uppercase tracking-wider font-mono mb-0.5">Players</div>
             <div className="text-lg font-black font-mono text-white tabular-nums">{total}</div>
           </div>
+          {scope === 'seasonal' && (
+            <div className="bg-violet-500/8 border border-violet-400/20 rounded-xl px-4 py-2.5 text-center">
+              <div className="text-[9px] text-violet-400/60 uppercase tracking-wider font-mono mb-0.5">Season</div>
+              <div className="text-lg font-black font-mono text-violet-300 tabular-nums">{CURRENT_YEAR}</div>
+            </div>
+          )}
           {me && (
             <div className="bg-amber-400/5 border border-amber-400/25 rounded-xl px-4 py-2.5 text-center">
               <div className="text-[9px] text-amber-400/60 uppercase tracking-wider font-mono mb-0.5">Your Rank</div>
@@ -339,15 +381,15 @@ export function RankingsPage({ user }: RankingsPageProps) {
 
       {/* ── Controls: scope · year · search ──────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
-        {/* The Yearly half is offered only when a season actually holds points, so the control
-            can never lead somewhere empty. `years` comes from the API for that reason. */}
+        {/* Three-tab scope control. Yearly and Seasonal are offered only when the API has
+            returned at least one year with points, so neither can lead somewhere empty. */}
         <div className="inline-flex items-center bg-slate-900/80 border border-slate-800 rounded-xl p-1">
           <button
             type="button"
-            onClick={() => { setYear(null); setPage(1); }}
-            aria-pressed={year === null}
+            onClick={() => changeScope('all-time')}
+            aria-pressed={scope === 'all-time'}
             className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70 focus-visible:ring-inset ${
-              year === null ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
+              scope === 'all-time' ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
             }`}
           >
             All-time
@@ -355,26 +397,41 @@ export function RankingsPage({ user }: RankingsPageProps) {
           {years.length > 0 && (
             <button
               type="button"
-              onClick={() => { setYear(years[0]); setPage(1); }}
-              aria-pressed={year !== null}
+              onClick={() => changeScope('yearly')}
+              aria-pressed={scope === 'yearly'}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70 focus-visible:ring-inset ${
-                year !== null ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
+                scope === 'yearly' ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
               }`}
             >
               Yearly
             </button>
           )}
+          {years.length > 0 && (
+            <button
+              type="button"
+              onClick={() => changeScope('seasonal')}
+              aria-pressed={scope === 'seasonal'}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70 focus-visible:ring-inset flex items-center gap-1.5 ${
+                scope === 'seasonal' ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Layers className={`w-3 h-3 flex-shrink-0 ${scope === 'seasonal' ? 'text-slate-950' : 'text-slate-500'}`} />
+              Seasonal
+            </button>
+          )}
         </div>
 
-        {year !== null && (
-          <div role="group" aria-label="Season" className="inline-flex items-center gap-1 flex-wrap">
+        {/* Year picker — shown only under the yearly scope. Seasonal pins to CURRENT_YEAR
+            and does not need a picker; the banner below explains the scope. */}
+        {scope === 'yearly' && (
+          <div role="group" aria-label="Year" className="inline-flex items-center gap-1 flex-wrap">
             {years.map((y) => (
               <button
                 key={y}
                 type="button"
                 onClick={() => { setYear(y); setPage(1); }}
                 aria-pressed={year === y}
-                aria-label={`Season ${y}`}
+                aria-label={`Year ${y}`}
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-all border focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70 focus-visible:ring-inset ${
                   year === y
                     ? 'bg-amber-400/10 border-amber-400/30 text-amber-400'
@@ -409,6 +466,31 @@ export function RankingsPage({ user }: RankingsPageProps) {
           )}
         </div>
       </div>
+
+      {/* ── Seasonal info banner ─────────────────────────────────────────── */}
+      {scope === 'seasonal' && (
+        <div className="flex items-center gap-3 rounded-xl px-4 py-3 mb-5 border bg-violet-500/8 border-violet-400/20">
+          <div className="w-8 h-8 rounded-lg bg-violet-500/20 flex items-center justify-center flex-shrink-0">
+            <RotateCcw className="w-4 h-4 text-violet-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-black text-violet-300">{CURRENT_YEAR} Season</span>
+              <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-emerald-400 bg-emerald-400/10 border border-emerald-400/20 px-1.5 py-0.5 rounded-full">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Active
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+              DZPP resets every 3 rounds — only this season&apos;s scores count here.
+            </p>
+          </div>
+          <div className="flex-shrink-0 text-right">
+            <div className="text-[9px] text-slate-600 uppercase tracking-wider font-mono">Resets every</div>
+            <div className="text-sm font-black font-mono text-slate-400">3 rounds</div>
+          </div>
+        </div>
+      )}
 
       {/* Only reachable once the table outgrows a single response. Until then the search covers
           every ranked player, and saying otherwise would be noise. */}
@@ -567,6 +649,7 @@ export function RankingsPage({ user }: RankingsPageProps) {
 
       <p className="text-center text-[10px] text-slate-700 font-mono mt-8">
         DZPP is earned only from monthly challenge performances · Algeria only · distinct from osu! global pp
+        {scope === 'seasonal' && ' · seasonal rankings reset every 3 rounds'}
       </p>
     </div>
   );

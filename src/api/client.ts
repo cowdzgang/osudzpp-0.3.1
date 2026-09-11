@@ -623,21 +623,41 @@ export const api = {
   },
 
   // ── Challenge ──────────────────────────────────────────────────────────────
-  challenge: {
-    /** A round's leaderboard, best first. Defaults to the open round; [] when none. */
-    scores: (roundId?: number) =>
-      get<ApiChallengeScore[]>(
-        roundId === undefined ? "/challenge/scores" : `/challenge/scores?roundId=${roundId}`
-      ),
+challenge: {
+  scores: (roundId?: number) =>
+    get<ApiChallengeScore[]>(
+      roundId === undefined ? "/challenge/scores" : `/challenge/scores?roundId=${roundId}`
+    ),
     /** The caller's own recorded score for the open round, or null. */
-    my: () => get<ApiChallengeScore | null>("/challenge/my"),
+     my: () => get<ApiChallengeScore | null>("/challenge/my"),
     /**
      * Imports the caller's osu! score for the winning beatmap. The body is empty:
      * the map comes from the recorded winner and the player from the session.
      */
-    importMine: () =>
-      send<{ ok: boolean; score: ApiChallengeScore }>("POST", "/challenge/scores"),
-  },
+/** Candidate scores the caller can choose from for the current challenge. */
+  available: () =>
+    get<{
+      scores: Array<{
+        osuScoreId: number;
+        score: number;
+        accuracy: number;
+        misses: number;
+        mods: string;
+        pp: number | null;
+        rank: string;
+        passed: boolean;
+        endedAt: string | null;
+      }>;
+    }>("/challenge/scores/available"),
+
+/** Imports one specific score selected by the caller. */
+  importMine: (osuScoreId: number) =>
+    send<{ ok: boolean; score: ApiChallengeScore }>(
+      "POST",
+      "/challenge/scores",
+      { osuScoreId }
+    ),
+},
 
   // ── Rankings ───────────────────────────────────────────────────────────────
   rankings: {

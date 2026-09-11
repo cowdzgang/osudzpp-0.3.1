@@ -21,8 +21,10 @@ import {
   upsert,
 } from '../repo/challengeScores.js';
 import { scoreRound, toRoundPlay } from '../repo/dzpp.js';
-import { ScoreNotFound, fetchLatestUserScoreForDifficulty } from '../services/osu.js';
-
+import {
+  ScoreNotFound,
+  fetchUserRecentScoresForDifficulty,
+} from '../services/osu.js';
 
 const router = Router();
 
@@ -100,26 +102,82 @@ router.get('/scores', async (req, res) => {
 
 // GET /api/challenge/my — the caller's own recorded score for the open round.
 // 200 with a null body when they have not posted one, matching GET /votes/my.
-router.get('/my', requireAuth, async (req, res) => {
+// GET /api/challenge/scores/available — passed scores on the challenge beatmap
+// that were set during the challenge phase. No database write happens here.
+router.get('/scores/available', requireAuth, async (req, res) => {
   try {
-    const round = await findCurrent();
-    if (!round || !req.user) {
-      res.json(null);
+    const context = await resolveChallenge(null);
+    if (!context) {
+      res.status(409).json({ error: 'No round is open' });
       return;
     }
-    const row = await findForUser(round.id, req.user.id);
-    // null DZPP: one row cannot know the qualified field size, and guessing it would put a
-    // number on screen that the leaderboard would then contradict.
-    res.json(row === null ? null : toApiChallengeScore(row, 0, null));
+
+    const { round, winner } = context;
+
+    if (round.phase !== 'challenge') {
+      res.status(409).json({
+        error: `This round is in the ${round.phase} phase, so there is no challenge to play`,
+      });
+      return;
+    }
+
+    if (!winner) {
+      res.status(409).json({
+        error: 'This round has no recorded winner, so there is no challenge map',
+      });
+      return;
+    }
+
+    if (!req.user) {
+      res.status(401).json({ error: 'Not authenticated' });
+      return;
+    }
+
+    const challengeStartedAt = round.winner_approved_at;
+
+    if (!challengeStartedAt) {
+      res.status(409).json({
+        error: 'This challenge has no recorded start time',
+      });
+      return;
+    }
+
+    const plays = await fetchUserRecentScoresForDifficulty(
+      Number(winner.difficulty_id),
+      Number(req.user.osu_id)
+    );
+
+    const availableScores = plays.filter((play) => {
+      if (!play.endedAt) return false;
+      return new Date(play.endedAt) >= challengeStartedAt;
+    });
+
+    res.json({
+      scores: availableScores.map((play) => ({
+        osuScoreId: play.osuScoreId,
+        score: play.score,
+        accuracy: play.accuracy,
+        misses: play.misses,
+        mods: play.mods,
+        pp: play.pp,
+        rank: play.rank,
+        passed: play.passed,
+        endedAt: play.endedAt,
+      })),
+    });
   } catch (err) {
-    fail(res, err, 'my score');
+    if (err instanceof ScoreNotFound) {
+      res.json({ scores: [] });
+      return;
+    }
+
+    fail(res, err, 'available challenge scores');
   }
 });
 
-// POST /api/challenge/scores — import the caller's own osu! score for the winning map.
-//
-// The body is empty on purpose: the map comes from the round's recorded winner and the
-// player from the session, so there is nothing for a caller to assert. The score is
+// POST /api/challenge/scores — import the caller's selected osu! score for the winning map.
+// The client sends { osuScoreId }; the server re-fetches the player's eligible scores
+// and verifies that the selected score belongs to the authenticated session.
 // read from the osu! API with the application's own token — a play on a public beatmap
 // is public data, verified before this was built (docs/todo.txt E2).
 //
@@ -140,6 +198,9 @@ router.get('/my', requireAuth, async (req, res) => {
 //
 // This one reaches the osu! API too, and a player refreshing after every attempt is a
 // reasonable thing to do — so the limit is generous but present.
+// GET /api/challenge/scores/available — candidate scores the player can choose from.
+// This is read-only. It finds recent Standard plays on the current challenge beatmap.
+// The selected score is still verified again by POST /scores before it is stored.
 const importLimit = rateLimit({ limit: 20, windowMs: 60_000, what: 'score imports' });
 
 router.post('/scores', requireCanChallenge, importLimit, async (req, res) => {
@@ -151,49 +212,109 @@ router.post('/scores', requireCanChallenge, importLimit, async (req, res) => {
     }
 
     const { round, winner } = context;
+
     if (round.phase !== 'challenge') {
       res.status(409).json({
-        error: `This round is in the ${round.phase} phase, so there is no challenge to post a score to`,
+        error: `This round is in the ${round.phase} phase, so scores cannot be imported`,
       });
       return;
     }
+
     if (!winner) {
-      res.status(409).json({ error: 'This round has no recorded winner, so there is no challenge map' });
+      res.status(409).json({
+        error: 'This round has no recorded winner, so there is no challenge map',
+      });
       return;
     }
+
     if (!req.user) {
       res.status(401).json({ error: 'Not authenticated' });
       return;
     }
 
-    let play;
-    try {
-      play = await fetchLatestUserScoreForDifficulty(
-  Number(winner.difficulty_id),
-  Number(req.user.osu_id)
-   );
-    } catch (err) {
-      if (err instanceof ScoreNotFound) {
-        res.status(404).json({
-          error: 'osu! has no score for you on this beatmap yet. Set one and try again.',
-        });
-        return;
-      }
-      console.error('[challenge] osu! score fetch failed:', err instanceof Error ? err.message : err);
-      res.status(503).json({ error: 'Could not reach the osu! API' });
-      return;
-    }
+    const { osuScoreId } = req.body ?? {};
 
-    // Only scores set during the challenge phase are valid. winner_approved_at is the
-    // exact moment the challenge opened — any play before that timestamp predates the
-    // challenge and cannot count, even if it was set on the same beatmap.
+if (
+  typeof osuScoreId !== 'number' ||
+  !Number.isInteger(osuScoreId) ||
+  osuScoreId <= 0
+) {
+  res.status(400).json({ error: 'A valid osuScoreId is required' });
+  return;
+}
+
+let play;
+try {
+  const plays = await fetchUserRecentScoresForDifficulty(
+    Number(winner.difficulty_id),
+    Number(req.user.osu_id)
+  );
+
+  play = plays.find((candidate) => candidate.osuScoreId === osuScoreId);
+
+  if (!play) {
+    res.status(404).json({
+      error: 'That score is not available in your eligible challenge scores.',
+    });
+    return;
+  }
+} catch (err) {
+  if (err instanceof ScoreNotFound) {
+    res.status(404).json({
+      error: 'No eligible challenge scores were found.',
+    });
+    return;
+  }
+
+  console.error(
+    '[challenge] osu! score fetch failed:',
+    err instanceof Error ? err.message : err
+  );
+  res.status(503).json({
+    error: 'Could not reach the osu! API',
+  });
+  return;
+}
+
+// Validate the authoritative osu! score.
+if (play.osuUserId !== Number(req.user.osu_id)) {
+  res.status(403).json({
+    error: 'That score does not belong to your osu! account.',
+  });
+  return;
+}
+
+if (play.beatmapId !== Number(winner.difficulty_id)) {
+  res.status(422).json({
+    error: 'That score was not set on the challenge beatmap.',
+  });
+  return;
+}
+
+if (play.ruleset !== 'osu') {
+  res.status(422).json({
+    error: 'Only Standard scores can be imported for this challenge.',
+  });
+  return;
+}
+
+if (!play.passed) {
+  res.status(422).json({
+    error: 'Only passed scores can be imported.',
+  });
+  return;
+}
+
     const challengeStartedAt = round.winner_approved_at;
+
     if (!play.endedAt || !challengeStartedAt) {
       res.status(422).json({
-        error: 'Your score has no timestamp and cannot be verified. Set a new score and try again.',
+        error:
+          'Your score has no timestamp and cannot be verified. Set a new score and try again.',
       });
       return;
     }
+
     if (new Date(play.endedAt) < challengeStartedAt) {
       res.status(422).json({
         error:

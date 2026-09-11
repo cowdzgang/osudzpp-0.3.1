@@ -246,95 +246,108 @@ export function parseDifficultyId(input: string): number | null {
   }
   return null;
 }
-
-export async function fetchLatestUserScoreForDifficulty(
+export async function fetchUserRecentScoresForDifficulty(
   difficultyId: number,
   osuUserId: number
-): Promise<OsuScore> {
+): Promise<OsuScore[]> {
   const token = await getAppToken();
 
-  // 1) Resolve beatmap -> beatmapset id
-  const beatmapRes = await fetch(`${API_BASE}/beatmaps/${difficultyId}`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  const limit = 100;
+  const offset = 0;
+
+  const params = new URLSearchParams({
+    mode: 'osu',
+    limit: String(limit),
+    offset: String(offset),
   });
-  if (beatmapRes.status === 404) throw new ScoreNotFound('No such beatmap');
-  if (!beatmapRes.ok) {
-    throw new Error(`osu! GET /beatmaps/${difficultyId} failed: ${beatmapRes.status}`);
-  }
 
-  const beatmapBody = (await beatmapRes.json()) as Record<string, unknown>;
-  const beatmapsetId = asNumber(beatmapBody.beatmapset_id);
-  if (beatmapsetId === null) {
-    throw new Error(`osu! beatmap ${difficultyId} missing beatmapset_id`);
-  }
-
-  // 2) Get user recent scores in this beatmapset
-  const scoresRes = await fetch(
-    `${API_BASE}/beatmapsets/${beatmapsetId}/scores/users/${osuUserId}/all`,
-    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+  const res = await fetch(
+    `${API_BASE}/users/${osuUserId}/scores/recent?${params.toString()}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    }
   );
 
-  if (scoresRes.status === 404) throw new ScoreNotFound('No score on this beatmap');
-  if (!scoresRes.ok) {
+  if (res.status === 404) {
+    throw new ScoreNotFound('No recent scores found');
+  }
+
+  if (!res.ok) {
     throw new Error(
-      `osu! GET /beatmapsets/${beatmapsetId}/scores/users/${osuUserId}/all failed: ${scoresRes.status}`
+      `osu! GET /users/${osuUserId}/scores/recent failed: ${res.status}`
     );
   }
 
-  const body = (await scoresRes.json()) as { scores?: Array<Record<string, unknown>> };
-  const scores = Array.isArray(body.scores) ? body.scores : [];
+  const body = (await res.json()) as Array<Record<string, unknown>>;
 
-  // 3) Keep only target difficulty, pick latest by ended_at/created_at
-  const forDifficulty = scores.filter((s) => {
-    const bid =
-      asNumber((s.beatmap as Record<string, unknown> | undefined)?.id) ??
-      asNumber(s.beatmap_id);
-    return bid === difficultyId;
-  });
-
-  if (forDifficulty.length === 0) throw new ScoreNotFound('No score on this beatmap');
-
-  forDifficulty.sort((a, b) => {
-    const ta = Date.parse(
-      (typeof a.ended_at === 'string' && a.ended_at) ||
-        (typeof a.created_at === 'string' && a.created_at) ||
-        ''
+  if (!Array.isArray(body)) {
+    throw new Error(
+      `osu! GET /users/${osuUserId}/scores/recent returned an unexpected shape`
     );
-    const tb = Date.parse(
-      (typeof b.ended_at === 'string' && b.ended_at) ||
-        (typeof b.created_at === 'string' && b.created_at) ||
-        ''
-    );
-    return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
-  });
-
-  const s = forDifficulty[0];
-  const total = asNumber(s.total_score) ?? asNumber(s.score);
-  const accuracy = asNumber(s.accuracy);
-  if (total === null || accuracy === null) {
-    throw new Error(`osu! returned a score with no usable total or accuracy`);
   }
 
-  const stats = (s.statistics ?? {}) as Record<string, unknown>;
-  const misses = asNumber(stats.count_miss) ?? asNumber(stats.miss) ?? 0;
-  const id = asNumber(s.id);
+ const matching = body.filter((s) => {
+  const beatmap =
+    s.beatmap && typeof s.beatmap === 'object'
+      ? (s.beatmap as Record<string, unknown>)
+      : null;
 
-  return {
-    osuScoreId: id ?? 0,
-    score: Math.round(total),
-    accuracy: Math.round(accuracy * 10_000) / 100,
-    misses: Math.round(misses),
-    mods: readMods(s.mods),
-    pp: asNumber(s.pp),
-    rank: typeof s.rank === 'string' ? s.rank : '',
-    passed: s.passed !== false,
-    endedAt:
-      typeof s.ended_at === 'string'
-        ? s.ended_at
-        : typeof s.created_at === 'string'
-          ? s.created_at
-          : null,
-  };
+  return (
+    asNumber(beatmap?.id) === difficultyId &&
+    s.passed === true
+  );
+});
+
+  return matching.map((s) => {
+    const total = asNumber(s.total_score) ?? asNumber(s.score);
+    const accuracy = asNumber(s.accuracy);
+
+    if (total === null || accuracy === null) {
+      throw new Error(
+        'osu! returned a score with no usable total or accuracy'
+      );
+    }
+
+    const stats = (s.statistics ?? {}) as Record<string, unknown>;
+    const misses =
+      asNumber(stats.count_miss) ?? asNumber(stats.miss) ?? 0;
+    const id = asNumber(s.id);
+
+return {
+  osuScoreId: id ?? 0,
+  score: Math.round(total),
+  accuracy: Math.round(accuracy * 10_000) / 100,
+  misses: Math.round(misses),
+  mods: readMods(s.mods),
+  pp: asNumber(s.pp),
+  rank: typeof s.rank === 'string' ? s.rank : '',
+  passed: s.passed !== false,
+  endedAt:
+    typeof s.ended_at === 'string'
+      ? s.ended_at
+      : typeof s.created_at === 'string'
+        ? s.created_at
+        : null,
+
+  osuUserId:
+    s.user && typeof s.user === 'object'
+      ? asNumber((s.user as Record<string, unknown>).id)
+      : null,
+  beatmapId:
+    s.beatmap && typeof s.beatmap === 'object'
+      ? asNumber((s.beatmap as Record<string, unknown>).id)
+      : null,
+  ruleset:
+    typeof s.ruleset_id === 'string'
+      ? s.ruleset_id
+      : typeof s.mode === 'string'
+        ? s.mode
+        : null,
+};
+});
 }
 
 // ── Challenge scores (client-credentials) ────────────────────────────────────
@@ -365,6 +378,11 @@ export interface OsuScore {
   rank: string;
   passed: boolean;
   endedAt: string | null;
+
+  /** Internal osu! API metadata used to verify an imported score. */
+  osuUserId: number | null;
+  beatmapId: number | null;
+  ruleset: string | null;
 }
 
 /** Raised when the player has no score on that difficulty, so routes can answer 404. */
@@ -389,55 +407,6 @@ function readMods(raw: unknown): string {
   return acronyms.length === 0 ? 'NM' : acronyms.join('');
 }
 
-/**
- * One player's score on one difficulty. Throws ScoreNotFound when they have never
- * set one, which osu! answers with a 404 rather than an empty body.
- */
-export async function fetchUserScore(difficultyId: number, osuUserId: number): Promise<OsuScore> {
-  const res = await fetch(`${API_BASE}/beatmaps/${difficultyId}/scores/users/${osuUserId}`, {
-    headers: { Authorization: `Bearer ${await getAppToken()}`, Accept: 'application/json' },
-  });
-
-  if (res.status === 404) throw new ScoreNotFound('No score on this beatmap');
-  if (!res.ok) {
-    throw new Error(`osu! GET /beatmaps/${difficultyId}/scores/users/${osuUserId} failed: ${res.status}`);
-  }
-
-  // The endpoint wraps the score alongside its leaderboard position.
-  const body = (await res.json()) as { score?: Record<string, unknown> };
-  const s = (body.score ?? body) as Record<string, unknown>;
-
-  const total = asNumber(s.total_score) ?? asNumber(s.score);
-  const accuracy = asNumber(s.accuracy);
-  if (total === null || accuracy === null) {
-    throw new Error(`osu! returned a score with no usable total or accuracy`);
-  }
-
-  const stats = (s.statistics ?? {}) as Record<string, unknown>;
-  const misses = asNumber(stats.count_miss) ?? asNumber(stats.miss) ?? 0;
-  const id = asNumber(s.id);
-
-  return {
-    osuScoreId: id ?? 0,
-    score: Math.round(total),
-    // numeric(5,2) holds a percentage; the API's 0..1 fraction would store as 0.99.
-    accuracy: Math.round(accuracy * 10_000) / 100,
-    misses: Math.round(misses),
-    mods: readMods(s.mods),
-    // Parsed rather than discarded, as it was before DZPP. asNumber already answers null
-    // for the null osu! sends on an unrated play, which is the distinction the nullable
-    // challenge_scores.pp column exists to keep.
-    pp: asNumber(s.pp),
-    rank: typeof s.rank === 'string' ? s.rank : '',
-    passed: s.passed !== false,
-    endedAt:
-      typeof s.ended_at === 'string'
-        ? s.ended_at
-        : typeof s.created_at === 'string'
-          ? s.created_at
-          : null,
-  };
-}
 
 // ── Beatmap search (client-credentials) ──────────────────────────────────────
 //
